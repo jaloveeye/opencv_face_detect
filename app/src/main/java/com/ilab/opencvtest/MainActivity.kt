@@ -10,25 +10,34 @@ import android.os.Build
 import android.util.Log
 import android.view.SurfaceView
 import android.view.WindowManager
-import org.opencv.android.BaseLoaderCallback
-import org.opencv.android.CameraBridgeViewBase
-import org.opencv.android.LoaderCallbackInterface
-import org.opencv.android.OpenCVLoader
 import org.opencv.core.Mat
 import java.util.Collections
 import android.Manifest.permission.CAMERA
 import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+import android.app.Activity
+import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.media.FaceDetector
+import android.net.Uri
 import android.os.Environment
+import android.util.Pair
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.Toast
+import kotlinx.android.synthetic.main.activity_main.*
+import org.opencv.android.*
 import org.opencv.core.Core
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.lang.Exception
+import java.lang.Float
 
+private const val REQUEST_CHOOSE_IMAGE = 1002
+private const val BASE_WIDTH = 1280
+private const val BASE_HEIGHT = 720
 
 class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
     private var matInput: Mat? = null
@@ -39,6 +48,18 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
     external fun detect(cascadeClassifierFace: Long, cascadeClassifierEye: Long, matAddrInput: Long, matAddrResult: Long): Int
     private var cascadeClassifierFace: Long = 0
     private var cascadeClassifierEye: Long = 0
+
+
+    private var imageInput: Mat? = null
+    private var imageOutput: Mat? = null
+
+    // Max width (portrait mode)
+    private var imageMaxWidth = 0
+    // Max height (portrait mode)
+    private var imageMaxHeight = 0
+
+
+    private val isUseCamera = false
 
     companion object {
         private const val TAG = "opencv"
@@ -56,7 +77,7 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
         override fun onManagerConnected(status: Int) {
             when (status) {
                 LoaderCallbackInterface.SUCCESS -> {
-                    mOpenCvCameraView!!.enableView()
+//                    mOpenCvCameraView!!.enableView()
                 }
                 else -> {
                     super.onManagerConnected(status)
@@ -67,15 +88,26 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        window.setFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_FULLSCREEN,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+
+
         setContentView(R.layout.activity_main)
-        mOpenCvCameraView = findViewById<View>(R.id.activity_surface_view) as CameraBridgeViewBase
-        mOpenCvCameraView!!.visibility = SurfaceView.VISIBLE
-        mOpenCvCameraView!!.setCvCameraViewListener(this)
-        mOpenCvCameraView!!.setCameraIndex(1) // front-camera(1),  back-camera(0)
+
+        if (isUseCamera) {
+            mOpenCvCameraView = findViewById<View>(R.id.activity_surface_view) as CameraBridgeViewBase
+            mOpenCvCameraView!!.visibility = SurfaceView.VISIBLE
+            mOpenCvCameraView!!.setCvCameraViewListener(this)
+            mOpenCvCameraView!!.setCameraIndex(1) // front-camera(1),  back-camera(0)
+        }
     }
 
     public override fun onPause() {
@@ -144,6 +176,17 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 
     override fun onStart() {
         super.onStart()
+
+        val rootView = root
+        rootView.viewTreeObserver.addOnGlobalLayoutListener(
+            object : ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    rootView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    imageMaxWidth = rootView.width
+                    imageMaxHeight = rootView.height
+                }
+            })
+
         var havePermission = true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (checkSelfPermission(CAMERA) != PackageManager.PERMISSION_GRANTED
@@ -153,7 +196,17 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
             }
         }
         if (havePermission) {
-            onCameraPermissionGranted()
+
+            if (isUseCamera) onCameraPermissionGranted()
+            else readCascadeFile()
+
+            select_image_button.setOnClickListener {
+                startChooseImageIntentForResult()
+            }
+
+            processing_button.setOnClickListener {
+                imageProcessingFaceDetect()
+            }
         }
     }
 
@@ -235,4 +288,112 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
         cascadeClassifierFace = loadCascade(faceFileName)
         cascadeClassifierEye = loadCascade(eyeFileName)
     }
+
+    private fun test() {
+
+
+        matInput.let {
+            if (matResult == null) {
+                matResult = Mat(it!!.rows(), it!!.cols(), it!!.type())
+            }
+
+            matResult.let { result ->
+                val faceCount = detect(
+                    cascadeClassifierFace,
+                    cascadeClassifierEye,
+                    it!!.nativeObjAddr,
+                    result!!.nativeObjAddr
+                )
+            }
+        }
+    }
+
+    private fun startChooseImageIntentForResult() {
+        val intent = Intent()
+        intent.type = "image/*"
+        intent.action = Intent.ACTION_GET_CONTENT
+        startActivityForResult(
+            Intent.createChooser(intent, "Select Picture"),
+            REQUEST_CHOOSE_IMAGE
+        )
+    }
+
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        if (requestCode == REQUEST_CHOOSE_IMAGE && resultCode == Activity.RESULT_OK) {
+            // In this case, imageUri is returned by the chooser, save it.
+            faceDetectInImage(data?.data)
+        } else {
+            super.onActivityResult(requestCode, resultCode, data)
+        }
+    }
+
+    private fun faceDetectInImage(imageUri: Uri?) {
+        imageViewInput.setImageURI(imageUri)
+
+        try {
+            val imageBitmap = BitmapUtils.getBitmapFromContentUri(contentResolver, imageUri)
+                ?: return
+
+            // Get the dimensions of the image view
+            val targetedSize = targetedWidthHeight
+            // Determine how much to scale down the image
+            val scaleFactor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                Float.max(
+                    imageBitmap.width.toFloat() / targetedSize.first.toFloat(),
+                    imageBitmap.height.toFloat() / targetedSize.second.toFloat()
+                )
+            } else {
+                TODO("VERSION.SDK_INT < N")
+            }
+
+            val resizedBitmap = Bitmap.createScaledBitmap(
+                imageBitmap,
+                (imageBitmap.width / scaleFactor).toInt(),
+                (imageBitmap.height / scaleFactor).toInt(),
+                true
+            )
+
+            imageInput = Mat()
+            val bmp32 = resizedBitmap!!.copy(Bitmap.Config.ARGB_8888, true)
+            Utils.bitmapToMat(bmp32, imageInput)
+
+        } catch (e: Exception) {
+            println("error ${e.message}")
+        }
+    }
+
+    private fun imageProcessingFaceDetect() {
+        if (imageInput != null) {
+            imageInput.let {
+                if (imageOutput == null) {
+                    imageOutput = Mat(it!!.rows(), it!!.cols(), it!!.type())
+                }
+
+                imageOutput.let { result ->
+                    val faceCount = detect(cascadeClassifierFace, cascadeClassifierEye,  it!!.nativeObjAddr, result!!.nativeObjAddr)
+
+                    runOnUiThread {
+                        val msg = "face count is $faceCount"
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                        println(msg)
+                    }
+                }
+            }
+        }
+    }
+
+    private val targetedWidthHeight: Pair<Int, Int>
+        get() {
+            val targetWidth: Int
+            val targetHeight: Int
+
+            targetWidth = imageMaxWidth
+            targetHeight = imageMaxHeight
+
+            return Pair(targetWidth, targetHeight)
+        }
 }
